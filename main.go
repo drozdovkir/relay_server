@@ -62,7 +62,7 @@ func getTextFromClipboard() ([]byte, error) {
 	return contents, nil
 }
 
-func getFileFromStorage(path string) error {
+func checkFileInStorage(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("couldn't get the information about the file %s: %w", path, err)
@@ -88,16 +88,22 @@ func pasteTextToClipboard(newEntry []byte) error {
 	return nil
 }
 
-func saveFileToStorage(path string) (*os.File, error) {
+func saveFileToStorage(path string, requestBody io.Reader) error {
 	file, err := os.Create(path)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't create a new file %s: %w", path, err)
+		return fmt.Errorf("couldn't create a new file %s: %w", path, err)
 	}
-
-	return file, nil
+	defer file.Close()
+	
+	_, err = io.Copy(file, requestBody)
+	if err != nil {
+		return fmt.Errorf("couldn't copy the contents of the body to file: %w", err)
+	}
+	
+	return nil
 }
 
-func sendTree(w http.ResponseWriter, r *http.Request) {
+func getTree(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[sendTree] ")
 	defer log.SetPrefix(logPrefix)
@@ -116,7 +122,7 @@ func sendTree(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func sendText(w http.ResponseWriter, r *http.Request) {
+func getText(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[sendText] ")
 	defer log.SetPrefix(logPrefix)
@@ -136,13 +142,13 @@ func sendText(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func sendFile(w http.ResponseWriter, r *http.Request) {
+func getFile(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[sendFile] ")
 	defer log.SetPrefix(logPrefix)
 
 	path := fmt.Sprintf(".%s", r.URL.Path)
-	err := getFileFromStorage(path)
+	err := checkFileInStorage(path)
 
 	if err != nil {
 		log.Printf("couldn't send file: %v\n", err)
@@ -156,7 +162,7 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func uploadText(w http.ResponseWriter, r *http.Request) {
+func sendText(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[uploadText] ")
 	defer log.SetPrefix(logPrefix)
@@ -181,27 +187,19 @@ func uploadText(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func uploadFile(w http.ResponseWriter, r *http.Request) {
+func sendFile(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[uploadFile] ")
 	defer log.SetPrefix(logPrefix)
 
 	path := fmt.Sprintf(".%s", r.URL.Path)
-	file, err := saveFileToStorage(path)
+	err := saveFileToStorage(path, r.Body)
 	if err != nil {
-		log.Printf("couldn't read file contents from the request's body: %v\n", err)
+		log.Printf("couldn't upload file: %v\n", err)
 		http.Error(w, "Couldn't upload file", http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
 	
-	_, err = io.Copy(file, r.Body)
-	if err != nil {
-		log.Printf("couldn't save file to the storage: %v\n", err)
-		http.Error(w, "Couldn't upload file", http.StatusInternalServerError)
-		return
-	}
-
 	log.Printf("OK\n")
 }
 
@@ -227,11 +225,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /home", sendTree)
-	mux.HandleFunc("GET /storage/", sendFile)
-	mux.HandleFunc("GET /clipboard", sendText)
-	mux.HandleFunc("POST /storage/", uploadFile)
-	mux.HandleFunc("POST /clipboard", uploadText)
+	mux.HandleFunc("GET /home", getTree)
+	mux.HandleFunc("GET /storage/", getFile)
+	mux.HandleFunc("GET /clipboard", getText)
+	mux.HandleFunc("POST /storage/", sendFile)
+	mux.HandleFunc("POST /clipboard", sendText)
 
 	mw := &RestrictingMiddleware{next: mux, maxRequestSize: MAX_REQUEST_SIZE}
 	
