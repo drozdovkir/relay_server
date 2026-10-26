@@ -1,2 +1,8 @@
+include .env
+export
+
 all: main.go go.mod
 	go build .
+
+run: relay
+	./relay

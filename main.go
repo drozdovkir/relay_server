@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"fmt"
+	"strconv"
 	"path/filepath"
 	"log"
 	"net/http"
@@ -12,9 +13,8 @@ import (
 	"errors"
 )
 
-const STORAGE_PATH = "./storage/"
-const CLIPBOARD_PATH = "./clipboard"
-const MAX_REQUEST_SIZE = 100 * 1024 * 1024
+var STORAGE_PATH, CLIPBOARD_PATH string
+var MAX_REQUEST_SIZE int64
 
 func relayInitialize() {
 	os.MkdirAll(STORAGE_PATH, 0o755)
@@ -216,6 +216,15 @@ func (m *RestrictingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 }
 
 func main() {
+	STORAGE_PATH = os.Getenv("STORAGE_PATH")
+	CLIPBOARD_PATH = os.Getenv("CLIPBOARD_PATH")
+	MAX_REQUEST_SIZE, convErr := strconv.ParseInt(os.Getenv("MAX_REQUEST_SIZE"), 10, 64)
+	if convErr != nil {
+		MAX_REQUEST_SIZE = 100 * 1024 * 1024
+	}
+
+	fmt.Printf("%s\n%s\n%d\n", STORAGE_PATH, CLIPBOARD_PATH, MAX_REQUEST_SIZE)
+	
 	relayInitialize()
 
 	mux := http.NewServeMux()
