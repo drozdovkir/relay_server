@@ -222,8 +222,6 @@ func main() {
 	if convErr != nil {
 		MAX_REQUEST_SIZE = 100 * 1024 * 1024
 	}
-
-	fmt.Printf("%s\n%s\n%d\n", STORAGE_PATH, CLIPBOARD_PATH, MAX_REQUEST_SIZE)
 	
 	relayInitialize()
 
