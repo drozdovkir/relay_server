@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"fmt"
 	"strconv"
+	"encoding/binary"
 	"path/filepath"
 	"log"
 	"net/http"
@@ -13,21 +14,78 @@ import (
 	"errors"
 )
 
-var STORAGE_PATH, CLIPBOARD_PATH string
-var MAX_REQUEST_SIZE int64
+var (
+	STORAGE_PATH, CLIPBOARD_PATH, CLIPBOARD_INDEX_PATH string
+	MAX_REQUEST_SIZE int64
+	
+	index []int64
+
+	clipboardSize int64
+)
+
+func checkCreateFile(path string) (*os.File, error) {
+	var file *os.File
+	file, err := os.Open(path)
+	
+	if errors.Is(err, os.ErrNotExist) {
+		var err_ error
+		file, err_ = os.Create(path)
+		if err_ != nil {
+			return nil, fmt.Errorf("Couldn't create %s: %w", path, err_)
+		}
+		log.Printf("created %s\n", path)
+	} else if err != nil {
+		return nil, fmt.Errorf("Couldn't get information on %s", path, err)
+	}
+
+	return file, nil
+}
 
 func relayInitialize() {
 	os.MkdirAll(STORAGE_PATH, 0o755)
-	_, err := os.Stat(CLIPBOARD_PATH)
-	if errors.Is(err, os.ErrNotExist) {
-		file, err_ := os.Create(CLIPBOARD_PATH)
-		if err_ != nil {
-			log.Fatal("Couldn't create a clipboard file")
-		}
-		file.Close()
-	} else if err != nil {
-		log.Fatal("Couldn't get information on clipboard file")
+	
+	clipboardFile, err := checkCreateFile(CLIPBOARD_PATH)
+	if err != nil {
+		log.Fatal("Initialization error: %v", err)
 	}
+	defer clipboardFile.Close()
+	
+	clipboardIndexFile, err := checkCreateFile(CLIPBOARD_INDEX_PATH)
+	if err != nil {
+		log.Fatal("Initialization error: %v", err)
+	}
+	defer clipboardIndexFile.Close()
+
+	info, _ := clipboardFile.Stat()
+	clipboardSize = info.Size()
+	log.Printf("clipboard size %d\n", clipboardSize)
+
+	info, _ = clipboardIndexFile.Stat()
+	clipboardIndexSize := info.Size()
+	log.Printf("clipboard index size %d\n", clipboardIndexSize)
+	
+	index = make([]int64, clipboardIndexSize/8)
+	for k := 0; k < len(index); k++ {
+		err = binary.Read(clipboardIndexFile, binary.BigEndian, &index[k])
+		if err != nil {
+			break
+		}
+	}
+
+	if err != nil && err != io.EOF {
+		log.Fatal("Invalid format of clipboard index")
+	}
+
+	for len(index) - 1 >= 0 && index[len(index) - 1] >= clipboardSize {
+		index = index[:len(index)-1]
+		ooo := clipboardIndexFile.Truncate((int64)(8*len(index)))
+		if ooo != nil {
+			log.Printf("Couldn't truncate file: %v\n", ooo)
+		}
+		log.Printf("Invalid clipboard index entry removed\n")
+	}
+
+	log.Printf("Relay server: initialization complete\n")
 }
 
 func getStorageDirectoryTree() (string, error) {
@@ -54,12 +112,38 @@ func getStorageDirectoryTree() (string, error) {
 	return result.String(), nil
 }
 
-func getTextFromClipboard() ([]byte, error) {
-	contents, err := os.ReadFile(CLIPBOARD_PATH)
+func getTextFromClipboard(n int) ([]byte, error) {
+	// Emulating Python's negative indexing
+	if (n >= len(index)) || (-n > len(index)) {
+		return nil, fmt.Errorf("getTextFromClipboard: index out of bounds")
+	}
+	
+	file, err := os.Open(CLIPBOARD_PATH)
+	if err != nil {
+		return nil, fmt.Errorf("getTextFromClipboard: couldn't open the clipboard: %w", err)
+	}
+	defer file.Close()
+	
+	n_ := n
+	if n_ < 0 {
+		n_ = len(index) + n_
+	}
+	begin := index[n_]
+	
+	end := clipboardSize
+	if n_ + 1 < len(index) {
+		end = index[n_ + 1]
+	}
+	
+	buffer := make([]byte, end - begin)
+	file.Seek((int64)(begin), io.SeekStart)
+	_, err = file.Read(buffer)
+	
 	if err != nil {
 		return nil, fmt.Errorf("getTextFromClipboard: couldn't read the clipboard: %w", err)
 	}
-	return contents, nil
+	
+	return buffer, nil
 }
 
 func checkFileInStorage(path string) error {
@@ -74,17 +158,33 @@ func checkFileInStorage(path string) error {
 }
 
 func pasteTextToClipboard(newEntry []byte) error {
-	file, err := os.OpenFile(CLIPBOARD_PATH, os.O_APPEND|os.O_WRONLY, 0644)
+	clipboardFile, err := os.OpenFile(CLIPBOARD_PATH, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("pasteTextToClipboard: couldn't open clipboard: %w", err)
 	}
-	defer file.Close()
+	defer clipboardFile.Close()
 
-	_, err = file.WriteString(fmt.Sprintf("\n%s\n", newEntry))
+	clipboardIndexFile, err := os.OpenFile(CLIPBOARD_INDEX_PATH, os.O_WRONLY, 0644)
 	if err != nil {
+		return fmt.Errorf("pasteTextToClipboard: couldn't open clipboard index: %w", err)
+	}
+	defer clipboardIndexFile.Close()
+
+	clipboardIndexFile.Seek((int64)(8*len(index)), io.SeekStart)
+	
+	err = binary.Write(clipboardIndexFile, binary.BigEndian, clipboardSize)
+	if err != nil {
+		return fmt.Errorf("pasteTextToClipboard: couldn't write to the clipboard index: %w", err)
+	}
+	
+	_, err = clipboardFile.WriteString(fmt.Sprintf("%s", newEntry))
+	if err != nil {
+		clipboardIndexFile.Truncate(int64(8*len(index)))
 		return fmt.Errorf("pasteTextToClipboard: couldn't write to the clipboard: %w", err)
 	}
-
+	
+	index = append(index, clipboardSize)
+	clipboardSize += (int64)(len(newEntry))
 	return nil
 }
 
@@ -126,8 +226,15 @@ func getText(w http.ResponseWriter, r *http.Request) {
 	logPrefix := log.Prefix()
 	log.SetPrefix("[sendText] ")
 	defer log.SetPrefix(logPrefix)
+
+	n, convErr := strconv.ParseInt(r.URL.Query().Get("n"), 10, 0)
+	if convErr != nil {
+		log.Printf("couldn't parse the request's URL params: %v\n", convErr)
+		http.Error(w, "", http.StatusBadRequest)
+		return
+	}
 	
-	text, err := getTextFromClipboard()
+	text, err := getTextFromClipboard((int)(n))
 
 	if err != nil {
 		log.Printf("couldn't send text: %v\n", err)
@@ -203,6 +310,10 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 	log.Printf("OK\n")
 }
 
+type SimpleLogger struct {
+	
+}
+
 type RestrictingMiddleware struct {
 	next http.Handler
 	maxRequestSize int64
@@ -216,6 +327,7 @@ func (m *RestrictingMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 func main() {
 	STORAGE_PATH = os.Getenv("STORAGE_PATH")
 	CLIPBOARD_PATH = os.Getenv("CLIPBOARD_PATH")
+	CLIPBOARD_INDEX_PATH = os.Getenv("CLIPBOARD_INDEX_PATH")
 	MAX_REQUEST_SIZE, convErr := strconv.ParseInt(os.Getenv("MAX_REQUEST_SIZE"), 10, 64)
 	if convErr != nil {
 		MAX_REQUEST_SIZE = 100 * 1024 * 1024
