@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"errors"
 )
 
 var (
@@ -25,19 +24,10 @@ var (
 
 func checkCreateFile(path string) (*os.File, error) {
 	var file *os.File
-	file, err := os.Open(path)
-	
-	if errors.Is(err, os.ErrNotExist) {
-		var err_ error
-		file, err_ = os.Create(path)
-		if err_ != nil {
-			return nil, fmt.Errorf("Couldn't create %s: %w", path, err_)
-		}
-		log.Printf("created %s\n", path)
-	} else if err != nil {
-		return nil, fmt.Errorf("Couldn't get information on %s", path, err)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("Error while handling %s: %w", path, err)
 	}
-
 	return file, nil
 }
 
@@ -78,10 +68,7 @@ func relayInitialize() {
 
 	for len(index) - 1 >= 0 && index[len(index) - 1] >= clipboardSize {
 		index = index[:len(index)-1]
-		ooo := clipboardIndexFile.Truncate((int64)(8*len(index)))
-		if ooo != nil {
-			log.Printf("Couldn't truncate file: %v\n", ooo)
-		}
+		clipboardIndexFile.Truncate((int64)(8*len(index)))
 		log.Printf("Invalid clipboard index entry removed\n")
 	}
 
